@@ -31,7 +31,6 @@ docker run -it \
     -v "/etc/localtime:/etc/localtime:ro" \
     -v "/dev:/dev" \
     -v "$PWD/corgi_ros_ws:/root/corgi_ros_ws"\
-    --gpus all \
     --workdir "/root/" \
     --user "root:root" \
     --name ros_noetic \
@@ -41,4 +40,5 @@ docker run -it \
     guanlunlu/corgi_docker \
     bash 
     
+# --gpus all \
 # osrf/ros:noetic-desktop-full \

@@ -41,11 +41,19 @@ class Corgi_mpc:
         
         self.mpc_param_ = None
         self.mpc_controller = None
+        self.pos_param = ImpedanceParam()
+        self.pos_param.K0 = np.array([1e6, 1e6])
+        self.pos_param.K_pid_x = np.zeros(3)
+        self.pos_param.K_pid_y = np.zeros(3)
+        self.imp_param = ImpedanceParam()
+        
+        self.fsm = "idle"
         
         self.if_init = False
         self.ref_cnt = 0
     
     def initialize(self):
+        self.reference_conf()
         self.mpc_controller = MPC(self.mpc_param_)
         self.if_init = True
     
@@ -63,7 +71,7 @@ class Corgi_mpc:
         self.mpc_param_ = param(Ns, Nu, Nt, dt, xmax, xmin, umax, umin)
 
         # Generate Reference trajectory
-        p0_ref = np.array([[0], [0], [0]])
+        p0_ref = np.array([[0], [0], [0.21]])
         q0_wxyz_ref = np.array([[1], [0], [0], [0]])
         R0_ref = quat2rotm(q0_wxyz_ref)
         w0_ref = np.array([[0], [0], [0]])
@@ -147,14 +155,37 @@ class Corgi_mpc:
                                                    data.D_LH.impedance.adaptive_ki_y, 
                                                    data.D_LH.impedance.adaptive_kd_y])        
     
+    def standup(self, vz=0.02):
+        pass
+        
+    
     def loop(self, event):
-        # rospy.loginfo("Timer callback triggered")
-        if self.if_init == True:
+        rospy.loginfo("Timer callback triggered")
+        print(self.fsm)
+        if self.fsm == "idle":
+            pass
+        
+        elif self.fsm == "standup":
+            if np.abs(self.state.pose[2] - self.mpc_param_.X_ref[0][2,3]) < 0.005:
+                self.fsm = "mpc"
+                print("switch to mpc")
+            else:
+                rs_ = [np.array([self.state.legs[i].pose[0,0], 0, self.state.legs[i].pose[1,0]]) + np.array([0,0,-0.05*self.dt]) for i in range(4)]
+                u_ = np.ones([12,1]) * 10
+                self.commandPublish(u_, rs_, self.pos_param)
+                
+        elif self.fsm == "mpc":
             X_ref_rt = self.mpc_param_.X_ref[self.ref_cnt]
             xi_ref_rt = self.mpc_param_.xi_ref[self.ref_cnt : (self.ref_cnt + self.mpc_param_.Nt)]
             
             X_se3_ = np.block([[quat2rotm(self.state.qwxyz), self.state.pose], [0,0,0,1]])
             rs_ = [np.array([self.state.legs[i].pose[0,0], 0, self.state.legs[i].pose[1,0]]) for i in range(4)]
+            
+            # print("X_se3_,\n", X_se3_)
+            # print("X_ref_rt,\n", X_ref_rt)
+            # print("xi_,\n", self.state.twist)
+            # print("xi_ref,\n", xi_ref_rt)
+            # print("rs_,\n", rs_)
             
             u = self.mpc_controller.mpc(X_se3_, X_ref_rt, self.state.twist, xi_ref_rt, rs_)
             # calculate total wrench
@@ -181,38 +212,90 @@ class Corgi_mpc:
             rs_next = []
             for rs in rs_:
                 rs_next.append(np.linalg.inv(X_se3_next)@X_se3_@rs.reshape(3,1))
-            
+            self.commandPublish(u, rs_next, self.imp_param)
             self.ref_cnt += 1
-            
-    def commandPublish(self, u, rs):
+    
+    def commandPublish(self, u, rs, imp_param):
         robot_msg = RobotStamped()
-        robot_msg.A_LF.force.pose_x = rs[0][0,0]
-        robot_msg.A_LF.force.pose_y = rs[0][2,0]
+        robot_msg.A_LF.force.pose_x = rs[0][0]
+        robot_msg.A_LF.force.pose_y = rs[0][2]
         robot_msg.A_LF.force.force_x = u[0]
         robot_msg.A_LF.force.force_y = u[2]
-        robot_msg.B_RF.force.pose_x = rs[1][0,0]
-        robot_msg.B_RF.force.pose_y = rs[1][2,0]
+        
+        robot_msg.A_LF.impedance.M_x = imp_param.M[0]
+        robot_msg.A_LF.impedance.M_y = imp_param.M[1]
+        robot_msg.A_LF.impedance.K0_x = imp_param.K0[0]
+        robot_msg.A_LF.impedance.K0_y = imp_param.K0[1]
+        robot_msg.A_LF.impedance.D_x = imp_param.D[0]
+        robot_msg.A_LF.impedance.D_y = imp_param.D[1]
+        robot_msg.A_LF.impedance.adaptive_kp_x = imp_param.K_pid_x[0]
+        robot_msg.A_LF.impedance.adaptive_ki_x = imp_param.K_pid_x[1]
+        robot_msg.A_LF.impedance.adaptive_kd_x = imp_param.K_pid_x[2]
+        robot_msg.A_LF.impedance.adaptive_kp_y = imp_param.K_pid_y[0]
+        robot_msg.A_LF.impedance.adaptive_ki_y = imp_param.K_pid_y[1]
+        robot_msg.A_LF.impedance.adaptive_kd_y = imp_param.K_pid_y[2]
+        
+        robot_msg.B_RF.force.pose_x = rs[1][0]
+        robot_msg.B_RF.force.pose_y = rs[1][2]
         robot_msg.B_RF.force.force_x = u[3]
         robot_msg.B_RF.force.force_y = u[5]
-        robot_msg.C_RH.force.pose_x = rs[2][0,0]
-        robot_msg.C_RH.force.pose_y = rs[2][2,0]
+        robot_msg.B_RF.impedance.M_x = imp_param.M[0]
+        robot_msg.B_RF.impedance.M_y = imp_param.M[1]
+        robot_msg.B_RF.impedance.K0_x = imp_param.K0[0]
+        robot_msg.B_RF.impedance.K0_y = imp_param.K0[1]
+        robot_msg.B_RF.impedance.D_x = imp_param.D[0]
+        robot_msg.B_RF.impedance.D_y = imp_param.D[1]
+        robot_msg.B_RF.impedance.adaptive_kp_x = imp_param.K_pid_x[0]
+        robot_msg.B_RF.impedance.adaptive_ki_x = imp_param.K_pid_x[1]
+        robot_msg.B_RF.impedance.adaptive_kd_x = imp_param.K_pid_x[2]
+        robot_msg.B_RF.impedance.adaptive_kp_y = imp_param.K_pid_y[0]
+        robot_msg.B_RF.impedance.adaptive_ki_y = imp_param.K_pid_y[1]
+        robot_msg.B_RF.impedance.adaptive_kd_y = imp_param.K_pid_y[2]
+        
+        robot_msg.C_RH.force.pose_x = rs[2][0]
+        robot_msg.C_RH.force.pose_y = rs[2][2]
         robot_msg.C_RH.force.force_x = u[6]
         robot_msg.C_RH.force.force_y = u[8]
-        robot_msg.D_LH.force.pose_x = rs[3][0,0]
-        robot_msg.D_LH.force.pose_y = rs[3][2,0]
+        robot_msg.C_RH.impedance.M_x = imp_param.M[0]
+        robot_msg.C_RH.impedance.M_y = imp_param.M[1]
+        robot_msg.C_RH.impedance.K0_x = imp_param.K0[0]
+        robot_msg.C_RH.impedance.K0_y = imp_param.K0[1]
+        robot_msg.C_RH.impedance.D_x = imp_param.D[0]
+        robot_msg.C_RH.impedance.D_y = imp_param.D[1]
+        robot_msg.C_RH.impedance.adaptive_kp_x = imp_param.K_pid_x[0]
+        robot_msg.C_RH.impedance.adaptive_ki_x = imp_param.K_pid_x[1]
+        robot_msg.C_RH.impedance.adaptive_kd_x = imp_param.K_pid_x[2]
+        robot_msg.C_RH.impedance.adaptive_kp_y = imp_param.K_pid_y[0]
+        robot_msg.C_RH.impedance.adaptive_ki_y = imp_param.K_pid_y[1]
+        robot_msg.C_RH.impedance.adaptive_kd_y = imp_param.K_pid_y[2]
+
+        robot_msg.D_LH.force.pose_x = rs[3][0]
+        robot_msg.D_LH.force.pose_y = rs[3][2]
         robot_msg.D_LH.force.force_x = u[9]
         robot_msg.D_LH.force.force_y = u[11]
+        robot_msg.D_LH.impedance.M_x = imp_param.M[0]
+        robot_msg.D_LH.impedance.M_y = imp_param.M[1]
+        robot_msg.D_LH.impedance.K0_x = imp_param.K0[0]
+        robot_msg.D_LH.impedance.K0_y = imp_param.K0[1]
+        robot_msg.D_LH.impedance.D_x = imp_param.D[0]
+        robot_msg.D_LH.impedance.D_y = imp_param.D[1]
+        robot_msg.D_LH.impedance.adaptive_kp_x = imp_param.K_pid_x[0]
+        robot_msg.D_LH.impedance.adaptive_ki_x = imp_param.K_pid_x[1]
+        robot_msg.D_LH.impedance.adaptive_kd_x = imp_param.K_pid_x[2]
+        robot_msg.D_LH.impedance.adaptive_kp_y = imp_param.K_pid_y[0]
+        robot_msg.D_LH.impedance.adaptive_ki_y = imp_param.K_pid_y[1]
+        robot_msg.D_LH.impedance.adaptive_kd_y = imp_param.K_pid_y[2]
+        
         self.force_pub.publish(robot_msg)
-
+        print("cmd published")
+            
 
 if __name__ == '__main__':
     print("MPC started")
     rospy.init_node("corgi_mpc", anonymous=True)
-    # pub = rospy.Publisher("force/force_command")
-    
-    
     
     cmpc = Corgi_mpc()
-    
+    cmpc.initialize()
+    cmpc.fsm = "standup"
     rospy.spin()
     

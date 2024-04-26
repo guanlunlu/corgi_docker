@@ -6,7 +6,7 @@ from scipy.integrate import solve_ivp
 from scipy import sparse
 import sys
 import pandas as pd
-from corgi_mpc.src.logger import *
+from logger import *
 import time
 
 
